@@ -1,0 +1,159 @@
+
+services:
+  # NATS JetStream for event streaming
+  nats:
+    image: nats:2.10-alpine
+    container_name: polymarket-nats
+    ports:
+      - "4222:4222"   # Client connections
+      - "8222:8222"   # HTTP monitoring
+      - "6222:6222"   # Cluster
+    command:
+      - "-js"
+      - "-sd"
+      - "/data"
+      - "-m"
+      - "8222"
+    volumes:
+      - nats_data:/data
+    networks:
+      - polymarket
+    restart: unless-stopped
+
+  # TimescaleDB for time-series data
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: polymarket-timescaledb
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: polymarket
+      POSTGRES_USER: polymarket
+      POSTGRES_PASSWORD: polymarket
+      TIMESCALEDB_TELEMETRY: "off"
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    networks:
+      - polymarket
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U polymarket"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_preload_libraries=timescaledb"
+      - "-c"
+      - "max_connections=200"
+      - "-c"
+      - "shared_buffers=512MB"
+      - "-c"
+      - "effective_cache_size=2GB"
+      - "-c"
+      - "maintenance_work_mem=128MB"
+
+  # Polymarket Indexer
+  indexer:
+    build:
+      context: .
+      target: indexer
+    container_name: polymarket-indexer
+    depends_on:
+      nats:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+    volumes:
+      - ./config.toml:/app/config.toml:ro
+      - indexer_data:/app/data
+    environment:
+      - CONFIG_PATH=/app/config.toml
+    networks:
+      - polymarket
+    restart: unless-stopped
+    ports:
+      - "8080:8080"  # API & metrics
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # NATS Consumer → TimescaleDB
+  consumer:
+    build:
+      context: .
+      target: consumer
+    depends_on:
+      nats:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+    volumes:
+      - ./config.toml:/app/config.toml:ro
+    environment:
+      - CONFIG_PATH=/app/config.toml
+    networks:
+      - polymarket
+    restart: unless-stopped
+    deploy:
+      replicas: 2  # Scale consumers for throughput
+
+  # Prometheus for metrics (optional)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: polymarket-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+    networks:
+      - polymarket
+    restart: unless-stopped
+    profiles:
+      - monitoring
+
+  # Grafana for visualization (optional)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: polymarket-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    networks:
+      - polymarket
+    restart: unless-stopped
+    profiles:
+      - monitoring
+
+networks:
+  polymarket:
+    driver: bridge
+
+volumes:
+  nats_data:
+    driver: local
+  timescale_data:
+    driver: local
+  indexer_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local

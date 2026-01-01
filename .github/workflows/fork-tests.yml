@@ -1,0 +1,68 @@
+name: Fork Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  fork-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+          cache: true
+      
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+      
+      - name: Verify Anvil installation
+        run: anvil --version
+      
+      - name: Start Anvil fork (daemon mode)
+        env:
+          DAEMON: 1
+        run: |
+          ./scripts/start-fork.sh 55000000
+          echo "Waiting for Anvil to be ready..."
+          sleep 5
+      
+      - name: Check Anvil status
+        run: ./scripts/check-fork.sh
+      
+      - name: Download Go dependencies
+        run: go mod download
+      
+      - name: Run fork tests
+        run: go test ./test -v -timeout 10m
+        continue-on-error: false
+      
+      - name: Show Anvil logs on failure
+        if: failure()
+        run: |
+          echo "=== Anvil Logs ==="
+          cat anvil.log || echo "No log file found"
+      
+      - name: Stop Anvil
+        if: always()
+        run: ./scripts/stop-fork.sh
+      
+      - name: Upload logs as artifact
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: anvil-logs
+          path: |
+            anvil.log
+            .anvil.pid
+          retention-days: 7

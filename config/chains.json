@@ -1,0 +1,59 @@
+{
+  "chains": {
+    "polygon": {
+      "chainId": 137,
+      "name": "Polygon Mainnet",
+      "rpcUrls": [
+        "https://polygon-rpc.com",
+        "https://rpc.ankr.com/polygon",
+        "https://polygon-mainnet.public.blastapi.io"
+      ],
+      "wsUrls": [
+        "wss://polygon-rpc.com",
+        "wss://rpc.ankr.com/polygon/ws"
+      ],
+      "contracts": {
+        "ctfExchange": "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
+        "conditionalTokens": "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+      },
+      "blockTime": 2,
+      "confirmations": 100,
+      "startBlock": 20558323
+    },
+    "polygon-fork": {
+      "chainId": 137,
+      "name": "Polygon Mainnet Fork (Anvil)",
+      "rpcUrls": [
+        "http://127.0.0.1:8545"
+      ],
+      "wsUrls": [
+        "ws://127.0.0.1:8545"
+      ],
+      "contracts": {
+        "ctfExchange": "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
+        "conditionalTokens": "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+      },
+      "blockTime": 0,
+      "confirmations": 1,
+      "startBlock": 20558323
+    },
+    "mumbai": {
+      "chainId": 80001,
+      "name": "Polygon Mumbai Testnet",
+      "rpcUrls": [
+        "https://rpc-mumbai.maticvigil.com",
+        "https://polygon-mumbai.g.alchemy.com/v2/demo"
+      ],
+      "wsUrls": [
+        "wss://rpc-mumbai.maticvigil.com/ws"
+      ],
+      "contracts": {
+        "ctfExchange": "0x0000000000000000000000000000000000000000",
+        "conditionalTokens": "0x0000000000000000000000000000000000000000"
+      },
+      "blockTime": 2,
+      "confirmations": 1,
+      "startBlock": 0
+    }
+  }
+}

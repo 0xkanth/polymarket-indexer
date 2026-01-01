@@ -1,0 +1,116 @@
+# =============================================================================
+# POLYMARKET INDEXER CONFIGURATION
+# =============================================================================
+# This config drives BOTH the indexer (producer) and consumer services.
+# The indexer reads Polygon blockchain → publishes to NATS JetStream
+# The consumer reads from NATS → writes to TimescaleDB
+# =============================================================================
+
+# =============================================================================
+# LOGGING - Used by: indexer, consumer
+# Purpose: Controls log verbosity and format for debugging/production
+# =============================================================================
+[logging]
+# Level options: "debug" (verbose), "info" (default), "warn", "error" (minimal)
+# Used in: internal/util/init.go → UpdateLogLevel()
+# Where: Sets global zerolog level for both services
+level = "info"
+
+# =============================================================================
+# CHAIN - Used by: indexer only
+# Purpose: Selects which chain to index from config/chains.json
+# =============================================================================
+[chain]
+# Chain name selector - loads config from config/chains.json
+# Used in: cmd/indexer/main.go → config.LoadConfig() → GetChain()
+# Options: "polygon" (mainnet), "polygon-fork" (local anvil), "mumbai" (testnet)
+# chains.json contains: RPC URLs, contract addresses, chain ID, confirmations, startBlock
+name = "polygon"
+
+# =============================================================================
+# DB - Used by: indexer only
+# Purpose: Local BoltDB stores last processed block number (checkpoint)
+# Allows indexer to resume from where it left off after restart
+# =============================================================================
+[db]
+# Path to BoltDB file for storing checkpoint state
+# Used in: cmd/indexer/main.go → db.NewCheckpointDB()
+# Where: internal/db/checkpoint.go - SaveCheckpoint(), LoadCheckpoint()
+checkpoint_path = "data/checkpoints.db"
+
+# =============================================================================
+# NATS - Used by: indexer, consumer
+# Purpose: Message queue between indexer (producer) and consumer
+# =============================================================================
+[nats]
+# NATS server URL
+# Used in: cmd/indexer/main.go → nats.NewPublisher()
+#          cmd/consumer/main.go → nats.Connect()
+# Start NATS with: docker-compose up nats (port 4222)
+url = "nats://localhost:4222"
+
+# Stream name in JetStream - persistent message queue
+# Used in: internal/nats/publisher.go → CreateOrUpdateStream()
+#          cmd/consumer/main.go → GetStream()
+stream_name = "POLYMARKET_EVENTS"
+
+# How long to keep messages in the stream (e.g., "168h" = 7 days)
+# Used in: internal/nats/publisher.go → StreamConfig.MaxAge
+# After this duration, old messages are deleted
+max_age = "168h"
+
+# Consumer durable name - allows resuming from last processed message
+# Used in: cmd/consumer/main.go → CreateOrUpdateConsumer()
+consumer_name = "polymarket-consumer-v1"
+
+# =============================================================================
+# INDEXER - Used by: indexer only
+# Purpose: Controls block processing behavior (chain data comes from chains.json)
+# =============================================================================
+[indexer]
+# NOTE: Contract addresses, startBlock, and confirmations are now in config/chains.json
+# This keeps chain-specific data centralized and enables multi-chain support
+
+# How many blocks to fetch per batch when backfilling history
+# Used in: cmd/indexer/main.go → syncer.Config.BatchSize
+# Where: internal/syncer/syncer.go → processes blocks in batches
+# Larger = faster but more memory, smaller = slower but safer
+# Recommended: 100-1000 depending on RPC rate limits
+batch_size = 100
+
+# How often to poll for new blocks (e.g., "2s", "5s")
+# Used in: cmd/indexer/main.go → syncer.Config.PollInterval
+# Where: internal/syncer/syncer.go → time.Sleep(pollInterval)
+# Polygon block time ~2 seconds, so "2s" is optimal
+poll_interval = "2s"
+
+# Number of concurrent workers for processing blocks
+# Used in: cmd/indexer/main.go → syncer.Config.Workers
+# Where: internal/syncer/syncer.go → worker pool size
+# Recommended: 3-10 depending on RPC rate limits and CPU cores
+workers = 5
+
+# =============================================================================
+# POSTGRES - Used by: consumer only
+# Purpose: TimescaleDB connection for storing processed events
+# =============================================================================
+[postgres]
+# Database connection parameters
+# Used in: cmd/consumer/main.go → pgxpool.Connect()
+host = "localhost"
+port = 5432
+user = "polymarket"
+password = "polymarket"
+database = "polymarket"
+sslmode = "disable"
+
+# =============================================================================
+# METRICS - Used by: indexer, consumer
+# Purpose: Prometheus metrics endpoint for monitoring performance
+# =============================================================================
+[metrics]
+# HTTP address for Prometheus /metrics endpoint
+# Used in: cmd/indexer/main.go, cmd/consumer/main.go → http.ListenAndServe()
+# Where: Exposes internal metrics (blocks/sec, events/sec, errors)
+# View at: http://localhost:9090/metrics (indexer), http://localhost:9091/metrics (consumer)
+address = ":9090"

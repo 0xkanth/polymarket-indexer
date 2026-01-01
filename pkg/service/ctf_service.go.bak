@@ -1,0 +1,564 @@
+package service
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"math/big"
+	"time"
+
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/ethclient"
+
+	"github.com/0xkanth/polymarket-indexer/pkg/config"
+	"github.com/0xkanth/polymarket-indexer/pkg/contracts"
+	"github.com/0xkanth/polymarket-indexer/pkg/txhelper"
+)
+
+// CTFService provides methods to interact with CTFExchange contract
+type CTFService struct {
+	client                *ethclient.Client
+	chainConfig           *config.ChainConfig
+	ctfExchange           *contracts.CTFExchange
+	conditionalTokens     *contracts.ConditionalTokens
+	ctfExchangeAddr       common.Address
+	conditionalTokensAddr common.Address
+	txHelper              *txhelper.TransactionHelper
+}
+
+// NewCTFService creates a new CTFService instance
+func NewCTFService(ctx context.Context, chainConfig *config.ChainConfig) (*CTFService, error) {
+	// Try connecting to RPC endpoints with fallback
+	var client *ethclient.Client
+	var err error
+
+	for i, rpcURL := range chainConfig.RPCUrls {
+		client, err = ethclient.DialContext(ctx, rpcURL)
+		if err != nil {
+			log.Printf("Failed to connect to RPC %d (%s): %v", i, rpcURL, err)
+			continue
+		}
+
+		// Test connection
+		_, err = client.ChainID(ctx)
+		if err != nil {
+			log.Printf("RPC %d responded but chain ID failed: %v", i, err)
+			client.Close()
+			continue
+		}
+
+		log.Printf("Connected to %s via RPC %d", chainConfig.Name, i)
+		break
+	}
+
+	if client == nil {
+		return nil, fmt.Errorf("failed to connect to any RPC endpoint")
+	}
+
+	ctfExchangeAddr := chainConfig.GetCTFExchangeAddress()
+	conditionalTokensAddr := chainConfig.GetConditionalTokensAddress()
+
+	// Bind to CTFExchange contract
+	ctfExchange, err := contracts.NewCTFExchange(ctfExchangeAddr, client)
+	if err != nil {
+		return nil, fmt.Errorf("failed to bind CTFExchange: %w", err)
+	}
+
+	// Bind to ConditionalTokens contract
+	conditionalTokens, err := contracts.NewConditionalTokens(conditionalTokensAddr, client)
+	if err != nil {
+		return nil, fmt.Errorf("failed to bind ConditionalTokens: %w", err)
+	}
+
+	// Create transaction helper
+	txHelper := txhelper.NewTransactionHelper(client, chainConfig.BlockTime, chainConfig.Confirmations)
+
+	return &CTFService{
+		client:                client,
+		chainConfig:           chainConfig,
+		ctfExchange:           ctfExchange,
+		conditionalTokens:     conditionalTokens,
+		ctfExchangeAddr:       ctfExchangeAddr,
+		conditionalTokensAddr: conditionalTokensAddr,
+		txHelper:              txHelper,
+	}, nil
+}
+
+// Close closes the underlying client connection
+func (s *CTFService) Close() {
+	s.client.Close()
+}
+
+// ============================================================================
+// READ METHODS (View/Pure functions - No gas cost)
+// ============================================================================
+
+// GetOrderStatus returns the status of an order by its hash
+func (s *CTFService) GetOrderStatus(ctx context.Context, orderHash [32]byte) (uint8, error) {
+	status, err := s.ctfExchange.GetOrderStatus(&bind.CallOpts{Context: ctx}, orderHash)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get order status: %w", err)
+	}
+	return status, nil
+}
+
+// GetComplement returns the complement of a position ID
+func (s *CTFService) GetComplement(ctx context.Context, token *big.Int) (*big.Int, error) {
+	complement, err := s.ctfExchange.GetComplement(&bind.CallOpts{Context: ctx}, token)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get complement: %w", err)
+	}
+	return complement, nil
+}
+
+// GetConditionId returns the condition ID for given parameters
+func (s *CTFService) GetConditionId(
+	ctx context.Context,
+	oracle common.Address,
+	questionId [32]byte,
+	outcomeSlotCount *big.Int,
+) ([32]byte, error) {
+	conditionId, err := s.conditionalTokens.GetConditionId(
+		&bind.CallOpts{Context: ctx},
+		oracle,
+		questionId,
+		outcomeSlotCount,
+	)
+	if err != nil {
+		return [32]byte{}, fmt.Errorf("failed to get condition ID: %w", err)
+	}
+	return conditionId, nil
+}
+
+// BalanceOf returns the balance of a position token for an address
+func (s *CTFService) BalanceOf(ctx context.Context, owner common.Address, positionId *big.Int) (*big.Int, error) {
+	balance, err := s.conditionalTokens.BalanceOf(&bind.CallOpts{Context: ctx}, owner, positionId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get balance: %w", err)
+	}
+	return balance, nil
+}
+
+// ============================================================================
+// TRANSACTION HELPERS (Delegated to txhelper package)
+// ============================================================================
+
+// ExecuteTransaction executes a transaction with simulation, gas estimation, and retry
+func (s *CTFService) ExecuteTransaction(
+	ctx context.Context,
+	msg ethereum.CallMsg,
+	auth *bind.TransactOpts,
+	sendFunc func(*bind.TransactOpts) (*types.Transaction, error),
+) (*types.Transaction, error) {
+	return s.txHelper.ExecuteTransaction(ctx, msg, auth, sendFunc)
+}
+
+// SendTransactionWithRetry sends a transaction with custom retry configuration
+func (s *CTFService) SendTransactionWithRetry(
+	ctx context.Context,
+	msg ethereum.CallMsg,
+	auth *bind.TransactOpts,
+	config *txhelper.TransactionConfig,
+	sendFunc func(*bind.TransactOpts) (*types.Transaction, error),
+) (*types.Transaction, error) {
+	return s.txHelper.SendTransactionWithRetry(ctx, msg, auth, config, sendFunc)
+}
+
+// SimulateTransaction simulates a transaction before sending
+func (s *CTFService) SimulateTransaction(ctx context.Context, msg ethereum.CallMsg) error {
+	return s.txHelper.SimulateTransaction(ctx, msg)
+}
+
+// EstimateGasWithBuffer estimates gas with a buffer percentage
+func (s *CTFService) EstimateGasWithBuffer(ctx context.Context, msg ethereum.CallMsg, bufferPercent int) (uint64, error) {
+	return s.txHelper.EstimateGasWithBuffer(ctx, msg, bufferPercent)
+}
+
+// WaitForTransaction waits for a transaction to be mined
+func (s *CTFService) WaitForTransaction(ctx context.Context, tx *types.Transaction) (*types.Receipt, error) {
+	return s.txHelper.WaitForTransaction(ctx, tx)
+}
+
+// ============================================================================
+// WRITE METHODS (State-changing transactions - Require gas)
+// ============================================================================
+
+// FillOrder fills an order on CTFExchange with production-grade retry logic
+func (s *CTFService) FillOrder(
+	ctx context.Context,
+	auth *bind.TransactOpts,
+	order contracts.Order,
+	fillAmount *big.Int,
+	signature []byte,
+) (*types.Transaction, error) {
+	// Prepare call message for simulation and gas estimation
+	msg := ethereum.CallMsg{
+		From:  auth.From,
+		To:    &s.ctfExchangeAddr,
+		Value: auth.Value,
+		Data:  nil, // Would need ABI-encoded FillOrder call data
+	}
+
+	// Use production-grade transaction execution
+	return s.ExecuteTransaction(ctx, msg, auth, func(opts *bind.TransactOpts) (*types.Transaction, error) {
+		return s.ctfExchange.FillOrder(opts, order, fillAmount, signature)
+	})
+}
+
+// FillOrderSimple is a simple version without retry logic (for testing)
+func (s *CTFService) FillOrderSimple(
+	ctx context.Context,
+	auth *bind.TransactOpts,
+	order contracts.Order,
+	fillAmount *big.Int,
+	signature []byte,
+) (*types.Transaction, error) {
+	auth.GasLimit = 0 // Let it estimate
+
+	tx, err := s.ctfExchange.FillOrder(auth, order, fillAmount, signature)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fill order: %w", err)
+	}
+
+	log.Printf("FillOrder transaction sent: %s", tx.Hash().Hex())
+	return tx, nil
+}
+
+// ============================================================================
+// EVENT LISTENING
+// ============================================================================
+// ============================================================================
+
+// TransactionConfig holds configuration for sending transactions
+type TransactionConfig struct {
+	MaxRetries      int           // Maximum retry attempts (default: 3)
+	InitialBackoff  time.Duration // Initial backoff duration (default: 1s)
+	MaxBackoff      time.Duration // Maximum backoff duration (default: 30s)
+	GasBufferPercent int          // Gas limit buffer % (default: 20)
+	Simulate        bool          // Simulate before sending (default: true)
+	TimeoutPerTry   time.Duration // Timeout per attempt (default: 30s)
+}
+
+// DefaultTransactionConfig returns safe defaults for transaction execution
+func DefaultTransactionConfig() *TransactionConfig {
+	return &TransactionConfig{
+		MaxRetries:       3,
+		InitialBackoff:   1 * time.Second,
+		MaxBackoff:       30 * time.Second,
+		GasBufferPercent: 20,
+		Simulate:         true,
+		TimeoutPerTry:    30 * time.Second,
+	}
+}
+
+// SimulateTransaction simulates a transaction using eth_call before sending
+// Returns nil if simulation succeeds, error if it would revert
+func (s *CTFService) SimulateTransaction(ctx context.Context, msg ethereum.CallMsg) error {
+	// Override gas limit for simulation (set high value)
+	msg.Gas = 30000000
+
+	result, err := s.client.CallContract(ctx, msg, nil)
+	if err != nil {
+		// Check if it's a revert with data
+		if strings.Contains(err.Error(), "execution reverted") {
+			return fmt.Errorf("simulation failed: %w", err)
+		}
+		return fmt.Errorf("simulation error: %w", err)
+	}
+
+	log.Printf("Simulation successful, result length: %d bytes", len(result))
+	return nil
+}
+
+// EstimateGasWithBuffer estimates gas and adds a buffer percentage
+func (s *CTFService) EstimateGasWithBuffer(ctx context.Context, msg ethereum.CallMsg, bufferPercent int) (uint64, error) {
+	// Estimate base gas
+	gasEstimate, err := s.client.EstimateGas(ctx, msg)
+	if err != nil {
+		return 0, fmt.Errorf("gas estimation failed: %w", err)
+	}
+
+	// Add buffer
+	buffer := gasEstimate * uint64(bufferPercent) / 100
+	gasWithBuffer := gasEstimate + buffer
+
+	// Cap at chain-specific limits
+	maxGasLimit := uint64(30000000) // 30M default
+	if gasWithBuffer > maxGasLimit {
+		gasWithBuffer = maxGasLimit
+	}
+
+	log.Printf("Gas estimated: %d, with %d%% buffer: %d", gasEstimate, bufferPercent, gasWithBuffer)
+	return gasWithBuffer, nil
+}
+
+// isRetryableError checks if an error is retryable (RPC/network issues)
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errStr := err.Error()
+	
+	// RPC errors (retryable)
+	retryableErrors := []string{
+		"connection refused",
+		"connection reset",
+		"EOF",
+		"timeout",
+		"TLS handshake timeout",
+		"no such host",
+		"network is unreachable",
+		"429", // Rate limit
+		"502", // Bad gateway
+		"503", // Service unavailable
+		"504", // Gateway timeout
+	}
+
+	for _, retryable := range retryableErrors {
+		if strings.Contains(errStr, retryable) {
+			return true
+		}
+	}
+
+	// Non-retryable errors (permanent failures)
+	permanentErrors := []string{
+		"execution reverted",
+		"insufficient funds",
+		"gas too low",
+		"nonce too low",
+		"replacement transaction underpriced",
+		"already known",
+	}
+
+	for _, permanent := range permanentErrors {
+		if strings.Contains(errStr, permanent) {
+			return false
+		}
+	}
+
+	// Check for RPC error codes
+	var rpcErr rpc.Error
+	if errors.As(err, &rpcErr) {
+		code := rpcErr.ErrorCode()
+		// Retryable RPC codes
+		if code == -32000 || code == -32603 { // Internal error, may be transient
+			return true
+		}
+	}
+
+	// Default: retry on unknown errors
+	return true
+}
+
+// SendTransactionWithRetry sends a transaction with exponential backoff retry
+func (s *CTFService) SendTransactionWithRetry(
+	ctx context.Context,
+	msg ethereum.CallMsg,
+	auth *bind.TransactOpts,
+	config *TransactionConfig,
+	sendFunc func(*bind.TransactOpts) (*types.Transaction, error),
+) (*types.Transaction, error) {
+	if config == nil {
+		config = DefaultTransactionConfig()
+	}
+
+	// Step 1: Simulate transaction if enabled
+	if config.Simulate {
+		log.Println("Simulating transaction...")
+		if err := s.SimulateTransaction(ctx, msg); err != nil {
+			return nil, fmt.Errorf("simulation failed, aborting: %w", err)
+		}
+	}
+
+	// Step 2: Estimate gas with buffer
+	log.Println("Estimating gas...")
+	gasLimit, err := s.EstimateGasWithBuffer(ctx, msg, config.GasBufferPercent)
+	if err != nil {
+		return nil, fmt.Errorf("gas estimation failed: %w", err)
+	}
+	auth.GasLimit = gasLimit
+
+	// Step 3: Send transaction with retry logic
+	var tx *types.Transaction
+	backoff := config.InitialBackoff
+
+	for attempt := 0; attempt <= config.MaxRetries; attempt++ {
+		if attempt > 0 {
+			log.Printf("Retry attempt %d/%d after %v", attempt, config.MaxRetries, backoff)
+			time.Sleep(backoff)
+
+			// Exponential backoff with jitter
+			backoff = backoff * 2
+			if backoff > config.MaxBackoff {
+				backoff = config.MaxBackoff
+			}
+		}
+
+		// Create timeout context for this attempt
+		attemptCtx, cancel := context.WithTimeout(ctx, config.TimeoutPerTry)
+		auth.Context = attemptCtx
+
+		// Send transaction
+		tx, err = sendFunc(auth)
+		cancel()
+
+		if err == nil {
+			log.Printf("Transaction sent successfully: %s", tx.Hash().Hex())
+			return tx, nil
+		}
+
+		log.Printf("Attempt %d failed: %v", attempt+1, err)
+
+		// Check if error is retryable
+		if !isRetryableError(err) {
+			return nil, fmt.Errorf("non-retryable error: %w", err)
+		}
+
+		// Last attempt, don't retry
+		if attempt == config.MaxRetries {
+			return nil, fmt.Errorf("max retries (%d) reached: %w", config.MaxRetries, err)
+		}
+	}
+
+	return nil, fmt.Errorf("transaction failed after %d attempts", config.MaxRetries)
+}
+
+// ExecuteTransaction is a high-level helper that combines simulation, gas estimation, and retry
+// This is the recommended way to send transactions in production
+func (s *CTFService) ExecuteTransaction(
+	ctx context.Context,
+	msg ethereum.CallMsg,
+	auth *bind.TransactOpts,
+	sendFunc func(*bind.TransactOpts) (*types.Transaction, error),
+) (*types.Transaction, error) {
+	config := DefaultTransactionConfig()
+	return s.SendTransactionWithRetry(ctx, msg, auth, config, sendFunc)
+}
+
+// ============================================================================
+// WRITE METHODS (State-changing transactions - Require gas)
+// ============================================================================
+
+// FillOrder fills an order on CTFExchange with production-grade retry logic
+func (s *CTFService) FillOrder(
+	ctx context.Context,
+	auth *bind.TransactOpts,
+	order contracts.Order,
+	fillAmount *big.Int,
+	signature []byte,
+) (*types.Transaction, error) {
+	// Prepare call message for simulation and gas estimation
+	// Note: You'll need the ABI-encoded data here. For now, using basic approach.
+	msg := ethereum.CallMsg{
+		From:  auth.From,
+		To:    &s.ctfExchangeAddr,
+		Value: auth.Value,
+		Data:  nil, // Would need ABI-encoded FillOrder call data
+	}
+
+	// Use production-grade transaction execution
+	return s.ExecuteTransaction(ctx, msg, auth, func(opts *bind.TransactOpts) (*types.Transaction, error) {
+		return s.ctfExchange.FillOrder(opts, order, fillAmount, signature)
+	})
+}
+
+// FillOrderSimple is a simple version without retry logic (for testing)
+func (s *CTFService) FillOrderSimple(
+	ctx context.Context,
+	auth *bind.TransactOpts,
+	order contracts.Order,
+	fillAmount *big.Int,
+	signature []byte,
+) (*types.Transaction, error) {
+	fillAmount *big.Int,
+	signature []byte,
+) (*types.Transaction, error) {
+	// Estimate gas with buffer
+	auth.GasLimit = 0 // Let it estimate
+
+	tx, err := s.ctfExchange.FillOrder(auth, order, fillAmount, signature)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fill order: %w", err)
+	}
+
+	log.Printf("FillOrder transaction sent: %s", tx.Hash().Hex())
+	return tx, nil
+}
+
+// WaitForTransaction waits for a transaction to be mined and returns the receipt
+func (s *CTFService) WaitForTransaction(ctx context.Context, tx *types.Transaction) (*types.Receipt, error) {
+	timeout := time.Duration(s.chainConfig.BlockTime*s.chainConfig.Confirmations) * time.Second
+	ctx, cancel := context.WithTimeout(ctx, timeout*2) // 2x safety margin
+	defer cancel()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("timeout waiting for transaction %s", tx.Hash().Hex())
+		default:
+		}
+
+		receipt, err := s.client.TransactionReceipt(ctx, tx.Hash())
+		if err == nil {
+			if receipt.Status == 0 {
+				return receipt, fmt.Errorf("transaction reverted: %s", tx.Hash().Hex())
+			}
+			log.Printf("Transaction mined in block %d with status %d", receipt.BlockNumber.Uint64(), receipt.Status)
+			return receipt, nil
+		}
+
+		// Wait before next poll
+		time.Sleep(time.Duration(s.chainConfig.BlockTime) * time.Second)
+	}
+}
+
+// ============================================================================
+// EVENT LISTENING
+// ============================================================================
+
+// WatchOrderFilled watches for OrderFilled events
+func (s *CTFService) WatchOrderFilled(
+	ctx context.Context,
+	sink chan<- *contracts.CTFExchangeOrderFilled,
+	orderHash [][32]byte,
+	maker []common.Address,
+	taker []common.Address,
+) (*bind.BoundContract, error) {
+	opts := &bind.WatchOpts{
+		Context: ctx,
+		Start:   nil, // Start from current block
+	}
+
+	sub, err := s.ctfExchange.WatchOrderFilled(opts, sink, orderHash, maker, taker)
+	if err != nil {
+		return nil, fmt.Errorf("failed to watch OrderFilled: %w", err)
+	}
+
+	return sub, nil
+}
+
+// FilterOrderFilled filters historical OrderFilled events
+func (s *CTFService) FilterOrderFilled(
+	ctx context.Context,
+	fromBlock, toBlock uint64,
+	orderHash [][32]byte,
+	maker []common.Address,
+	taker []common.Address,
+) (*contracts.CTFExchangeOrderFilledIterator, error) {
+	opts := &bind.FilterOpts{
+		Context: ctx,
+		Start:   fromBlock,
+		End:     &toBlock,
+	}
+
+	iter, err := s.ctfExchange.FilterOrderFilled(opts, orderHash, maker, taker)
+	if err != nil {
+		return nil, fmt.Errorf("failed to filter OrderFilled: %w", err)
+	}
+
+	return iter, nil
+}
