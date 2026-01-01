@@ -420,23 +420,30 @@ Blockchain → Syncer → Processor → Router → Handler → NATS → Consumer
 stateDiagram-v2
     [*] --> LoadCheckpoint
     LoadCheckpoint --> DetermineStrategy
+    
     DetermineStrategy --> Backfill: far behind
     DetermineStrategy --> Realtime: near head
     
-    Backfill --> ProcessBatch
-    ProcessBatch --> SaveCheckpoint
-    SaveCheckpoint --> CheckDistance
-    CheckDistance --> Backfill: still behind
-    CheckDistance --> Realtime: caught up
+    state Backfill {
+        [*] --> ProcessBatch
+        ProcessBatch --> SaveCheckpoint
+        SaveCheckpoint --> CheckDistance
+        CheckDistance --> ProcessBatch: still behind
+        CheckDistance --> [*]: caught up
+    }
     
-    Realtime --> PollNewBlocks
-    PollNewBlocks --> ProcessBlock
-    ProcessBlock --> SaveCheckpoint2: success
-    SaveCheckpoint2 --> CheckDistance2
-    CheckDistance2 --> Realtime: still near
-    CheckDistance2 --> Backfill: fell behind
+    state Realtime {
+        [*] --> PollNewBlocks
+        PollNewBlocks --> ProcessBlock
+        ProcessBlock --> SaveCheckpoint2: success
+        ProcessBlock --> PollNewBlocks: error (retry)
+        SaveCheckpoint2 --> CheckDistance2
+        CheckDistance2 --> PollNewBlocks: still near
+        CheckDistance2 --> [*]: fell behind
+    }
     
-    ProcessBlock --> Realtime: error (retry)
+    Backfill --> Realtime: caught up
+    Realtime --> Backfill: fell behind
 ```
 
 **Key Insight**: Syncer is a state machine that switches between backfill and realtime modes.

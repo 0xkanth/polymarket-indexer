@@ -43,7 +43,7 @@ stateDiagram-v2
         
         CheckLag --> AlreadyAtHead: behind = 0
         CheckLag --> ProcessSingle: 0 < behind ≤ batchSize*2
-        CheckLag --> Backfill: behind > batchSize*2
+        CheckLag --> [*]: behind > batchSize*2 (exit to switch)
         
         ProcessSingle --> SaveCheckpointRT: success
         ProcessSingle --> ErrorRetry: error
@@ -53,8 +53,8 @@ stateDiagram-v2
         ErrorRetry --> WaitPoll: mark unhealthy
     }
     
-    Backfill --> Realtime: mode switch
-    Realtime --> Backfill: fell behind
+    Backfill --> Realtime: caught up (behind ≤ batchSize*2)
+    Realtime --> Backfill: fell behind (behind > batchSize*2)
     
     Startup --> [*]: context canceled
     Backfill --> [*]: context canceled
